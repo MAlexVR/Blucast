@@ -1,0 +1,26 @@
+#!/bin/bash
+# Installed as /usr/bin/blucast by the RPM package.
+#
+# BluCast's actual runtime (the virtual-camera bind mounts, autostart
+# support, etc.) lives in a per-user directory at ~/.local/share/blucast,
+# exactly like the curl|bash quick installer sets up — this wrapper just
+# makes sure that directory exists and is up to date with what the RPM
+# shipped, then hands off to the real launcher there. That keeps a single
+# run.sh/control_panel.py implementation regardless of how BluCast was
+# installed (RPM, curl|bash, or a local `./install.sh` build).
+set -euo pipefail
+
+SYSTEM_DIR="/usr/share/blucast"
+INSTALL_DIR="$HOME/.local/share/blucast"
+
+mkdir -p "$INSTALL_DIR"
+for f in run.sh vcam_watcher.sh control_panel.py logo.svg; do
+    src="$SYSTEM_DIR/$f"
+    dst="$INSTALL_DIR/$f"
+    if [ ! -e "$dst" ] || [ "$src" -nt "$dst" ]; then
+        cp "$src" "$dst"
+    fi
+done
+chmod +x "$INSTALL_DIR/run.sh" "$INSTALL_DIR/vcam_watcher.sh"
+
+exec "$INSTALL_DIR/run.sh" "$@"

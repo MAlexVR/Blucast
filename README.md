@@ -266,6 +266,28 @@ The realistic path is a [COPR](https://copr.fedorainfracloud.org/) repo first
 (no review process, fast iteration), with Fedora/RPM Fusion submission once
 the package is stable.
 
+The spec file lives at [`packaging/blucast.spec`](packaging/blucast.spec)
+and builds cleanly today (`rpmbuild -ba packaging/blucast.spec`, verified
+locally against Fedora 44's `rpmbuild`). It installs `/usr/bin/blucast` (a
+small wrapper that syncs `/usr/share/blucast/*` into `~/.local/share/blucast`
+before handing off to the real launcher — the same per-user layout every
+install method uses), the desktop entry and icon, and the v4l2loopback
+module config under `/usr/lib/{modules-load.d,modprobe.d,udev/rules.d}/` so
+the virtual camera is ready on next boot with no manual `modprobe` needed.
+
+Publishing it on COPR needs a personal Fedora account (COPR builds are tied
+to your own [FAS](https://accounts.fedoraproject.org/) identity, so this is
+a step only a maintainer with such an account can do — not something that
+can be scripted on someone else's behalf):
+
+```bash
+sudo dnf install copr-cli
+copr-cli create blucast --chroot fedora-42-x86_64 --chroot fedora-43-x86_64
+copr-cli buildscm blucast \
+    --clone-url https://github.com/MAlexVR/Blucast.git \
+    --subdir packaging --spec blucast.spec
+```
+
 **Flatpak — not a good fit, and not planned.** Flatpak's sandbox model
 fundamentally conflicts with what this app needs to do: load a kernel module
 (`v4l2loopback`) and launch *another*, fully-privileged container runtime
