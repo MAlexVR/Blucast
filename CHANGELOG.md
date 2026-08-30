@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-30
+
+### Fixed
+- `run.sh`, `vcam_watcher.sh`, and `app/control_panel.py` at the repo root
+  had drifted from what was actually deployed/working — `run.sh` pointed at
+  a local test image tag and was missing the `--userns=keep-id` tray fix
+  and autostart support, and `vcam_watcher.sh` was missing
+  `camera_disabled` flag handling.
+- `install.sh` no longer hard-requires a manually downloaded `sdk/`
+  directory the current Containerfile has no use for, and now installs to
+  the same `~/.local/share/blucast` layout as the remote installer.
+- `scripts/install-remote.sh` no longer embeds its own separate,
+  independently-drifting copies of `run.sh`/`uninstall.sh` via heredocs,
+  and now actually deploys `control_panel.py` (a genuinely fresh remote
+  install would previously fail at the `control_panel.py` bind mount,
+  since it was never written to disk). All installed files are now
+  fetched from this repo, so there's one source of truth.
+
 ## [1.1.0] - 2026-08-30
 
 This is the first release published from this fork. It's additive on top of
@@ -111,7 +129,8 @@ Initial public release.
 - Live in-app preview.
 - GHCR-based container publishing workflow.
 
-[Unreleased]: https://github.com/MAlexVR/Blucast/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/MAlexVR/Blucast/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/MAlexVR/Blucast/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/MAlexVR/Blucast/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/Andrei9383/Blucast/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/Andrei9383/Blucast/compare/v1.0.3...v1.0.6
