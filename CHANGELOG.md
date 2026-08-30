@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-30
+
+### Added
+- RPM packaging (`packaging/blucast.spec`): installs a `/usr/bin/blucast`
+  launcher, desktop entry, icon, and v4l2loopback module configuration.
+  Follows the same pattern as `toolbox`/`distrobox` — the ~7GB container
+  image is never bundled in the package, podman still pulls it on first
+  launch. Verified building cleanly with `rpmbuild` against Fedora 44.
+  Publishing to a COPR repo is documented in README.md (needs a
+  maintainer's own Fedora account, so it isn't automated here).
+
 ## [1.1.1] - 2026-08-30
 
 ### Fixed
@@ -129,7 +140,8 @@ Initial public release.
 - Live in-app preview.
 - GHCR-based container publishing workflow.
 
-[Unreleased]: https://github.com/MAlexVR/Blucast/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/MAlexVR/Blucast/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/MAlexVR/Blucast/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/MAlexVR/Blucast/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/MAlexVR/Blucast/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/Andrei9383/Blucast/compare/v1.0.6...v1.0.7

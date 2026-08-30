@@ -1,5 +1,5 @@
 Name:           blucast
-Version:        1.1.1
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        Real-time AI-powered video effects using NVIDIA Maxine VideoFX SDK
 
@@ -103,10 +103,12 @@ fi
 %{_prefix}/lib/udev/rules.d/83-blucast-vcam.rules
 
 %changelog
+* Sun Aug 30 2026 Mauricio Vargas <mvargas.rodriguez@gmail.com> - 1.2.0-1
+- Initial RPM packaging
+
 * Sun Aug 30 2026 Mauricio Vargas <mvargas.rodriguez@gmail.com> - 1.1.1-1
 - Installer consistency fixes (see CHANGELOG.md)
 
 * Sun Aug 30 2026 Mauricio Vargas <mvargas.rodriguez@gmail.com> - 1.1.0-1
-- Initial RPM packaging
 - Auto Reframe, Virtual Light, multi-language UI, build no longer needs a
   manual NVIDIA SDK download (see CHANGELOG.md)
