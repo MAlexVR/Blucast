@@ -53,6 +53,11 @@ rm -f "$HOME/.local/share/applications/blucast.desktop"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 done_msg "Desktop entry removed"
 
+step "Removing installed app files..."
+rm -f "$HOME/.local/bin/blucast"
+rm -rf "$HOME/.local/share/blucast"
+done_msg "App files removed"
+
 step "Cleaning runtime files..."
 rm -rf /tmp/blucast
 done_msg "Runtime files cleaned"
@@ -80,5 +85,5 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}     BluCast uninstalled!${NC}"
 echo -e "${GREEN}══════════════════════════════════════${NC}"
 echo ""
-echo -e "  To reinstall, run ${BLUE}./install.sh${NC}."
+echo -e "  To reinstall: ${BLUE}curl -fsSL https://raw.githubusercontent.com/MAlexVR/Blucast/main/scripts/install-remote.sh | bash${NC}"
 echo ""

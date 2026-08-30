@@ -199,13 +199,13 @@ cd Blucast
 ### 2. Build and run
 
 ```bash
-podman build -t localhost/blucast:latest -f Containerfile .
-./install.sh   # or ./run.sh once installed
+./install.sh
 ```
 
-That's it — `podman build` pulls the CUDA/cuDNN base images and the
-`runtime-libs` stage automatically; there's no `sdk/` directory to populate
-by hand.
+That's it — `install.sh` builds the image (pulling the CUDA/cuDNN base
+images and the `runtime-libs` stage automatically, no `sdk/` directory to
+populate by hand), sets up the virtual camera, and installs a launcher and
+desktop entry, same as the [Quick Start](#quick-start) installer.
 
 <details>
 <summary>Building the runtime libraries themselves from the raw NVIDIA SDK (advanced, optional)</summary>

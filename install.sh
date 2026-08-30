@@ -24,7 +24,7 @@ echo -e "${BLUE}         BluCast Installer${NC}"
 echo -e "${BLUE}══════════════════════════════════════${NC}"
 echo ""
 
-echo -e "${BLUE}[1/5]${NC} Checking prerequisites..."
+echo -e "${BLUE}[1/4]${NC} Checking prerequisites..."
 
 if command -v podman &>/dev/null; then
     CONTAINER_CMD="podman"
@@ -47,7 +47,7 @@ else
     warn "See: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
 fi
 
-echo -e "${BLUE}[2/5]${NC} Setting up virtual camera..."
+echo -e "${BLUE}[2/4]${NC} Setting up virtual camera..."
 
 if ! modinfo v4l2loopback &>/dev/null 2>&1; then
     echo "  Installing v4l2loopback..."
@@ -125,30 +125,32 @@ done
 sleep 2
 log "PipeWire/portals refreshed"
 
-echo -e "${BLUE}[3/5]${NC} Checking SDK files..."
+echo -e "${BLUE}[3/4]${NC} Building container image..."
 
-SDK_DIR="$SCRIPT_DIR/sdk"
-if [ -f "$SCRIPT_DIR/sdk.tar.gz" ] && [ ! -d "$SDK_DIR/VideoFX" ]; then
-    echo "  Extracting SDK..."
-    tar -xzf "$SCRIPT_DIR/sdk.tar.gz" -C "$SCRIPT_DIR"
-fi
-[ -d "$SDK_DIR/VideoFX" ]           || die "VideoFX SDK not found in sdk/"
-[ -d "$SDK_DIR/TensorRT-8.5.1.7" ]  || die "TensorRT SDK not found in sdk/"
-[ -d "$SDK_DIR/cudnn" ]              || die "cuDNN libraries not found in sdk/"
-log "All SDK components present"
-
-echo -e "${BLUE}[4/5]${NC} Building container image..."
-
+# No NVIDIA SDK download needed: the Containerfile's runtime-libs stage
+# pulls the compiled Maxine VideoFX libraries and models from the
+# already-published ghcr.io/andrei9383/blucast image (see README.md's
+# License section for why that's allowed). Only the MIT-licensed headers
+# in app/third_party/ are needed to compile against them, and those are
+# already vendored in this repo.
 cd "$SCRIPT_DIR"
-$CONTAINER_CMD build -t "$IMAGE_NAME" -f Containerfile . \
+$CONTAINER_CMD build -t blucast:latest -f Containerfile . \
     || die "Container build failed"
 log "Container image built"
 
-echo -e "${BLUE}[5/5]${NC} Creating desktop entry..."
+echo -e "${BLUE}[4/4]${NC} Installing..."
 
-chmod +x "$SCRIPT_DIR/run.sh"
-chmod +x "$SCRIPT_DIR/scripts/vcam_watcher.sh" 2>/dev/null || true
-chmod +x "$SCRIPT_DIR/scripts/uninstall.sh" 2>/dev/null || true
+INSTALL_DIR="$HOME/.local/share/blucast"
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+
+cp "$SCRIPT_DIR/run.sh" "$INSTALL_DIR/run.sh"
+cp "$SCRIPT_DIR/scripts/vcam_watcher.sh" "$INSTALL_DIR/vcam_watcher.sh"
+cp "$SCRIPT_DIR/app/control_panel.py" "$INSTALL_DIR/control_panel.py"
+cp "$SCRIPT_DIR/assets/logo.svg" "$INSTALL_DIR/logo.svg"
+chmod +x "$INSTALL_DIR/run.sh" "$INSTALL_DIR/vcam_watcher.sh"
+ln -sf "$INSTALL_DIR/run.sh" "$BIN_DIR/blucast"
+log "Installed to $INSTALL_DIR"
 
 DESKTOP_FILE="$HOME/.local/share/applications/blucast.desktop"
 mkdir -p "$(dirname "$DESKTOP_FILE")"
@@ -156,8 +158,8 @@ cat > "$DESKTOP_FILE" << DESKTOP
 [Desktop Entry]
 Name=BluCast
 Comment=AI-Powered Virtual Camera
-Exec=$SCRIPT_DIR/run.sh
-Icon=$SCRIPT_DIR/assets/logo.svg
+Exec=$INSTALL_DIR/run.sh
+Icon=$INSTALL_DIR/logo.svg
 Terminal=false
 Type=Application
 Categories=Video;AudioVideo;
@@ -171,7 +173,7 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}     Installation Complete!${NC}"
 echo -e "${GREEN}══════════════════════════════════════${NC}"
 echo ""
-echo -e "  Launch:    ${BLUE}$SCRIPT_DIR/run.sh${NC}"
+echo -e "  Launch:    ${BLUE}$INSTALL_DIR/run.sh${NC} (or just ${BLUE}blucast${NC} if ~/.local/bin is on your PATH)"
 echo -e "  Or find   ${BLUE}BluCast${NC} in your application menu."
 echo -e "  Uninstall: ${BLUE}$SCRIPT_DIR/scripts/uninstall.sh${NC}"
 echo ""
