@@ -394,10 +394,10 @@ echo -e "${BLUE}[5/5]${NC} Creating desktop entry..."
 
 LOGO_PATH="$INSTALL_DIR/logo.svg"
 if command -v curl &>/dev/null; then
-    curl -fsSL "https://raw.githubusercontent.com/Andrei9383/BluCast/main/assets/logo.svg" \
+    curl -fsSL "https://raw.githubusercontent.com/MAlexVR/Blucast/main/assets/logo.svg" \
         -o "$LOGO_PATH" 2>/dev/null || true
 elif command -v wget &>/dev/null; then
-    wget -q "https://raw.githubusercontent.com/Andrei9383/BluCast/main/assets/logo.svg" \
+    wget -q "https://raw.githubusercontent.com/MAlexVR/Blucast/main/assets/logo.svg" \
         -O "$LOGO_PATH" 2>/dev/null || true
 fi
 ICON_VALUE="camera-video"

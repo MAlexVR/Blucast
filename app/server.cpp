@@ -9,8 +9,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -20,6 +22,8 @@
 #include "nvCVOpenCV.h"
 #include "nvVideoEffects.h"
 #include "opencv2/opencv.hpp"
+#include "opencv2/dnn.hpp"
+#include "opencv2/objdetect.hpp"
 
 //  Paths ───────────────────────────────────────────────────────────────
 static const char *SHARED_DIR      = "/tmp/blucast";
@@ -29,12 +33,24 @@ static const char *PREVIEW_FILE    = "/tmp/blucast/preview.jpg";
 static const char *PREVIEW_TMP     = "/tmp/blucast/preview.jpg.tmp";
 static const char *PID_FILE        = "/tmp/blucast/server.pid";
 static const char *VCAM_DEVICE     = "/dev/video10";
+static const char *FACE_CASCADE_PATH   = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_alt2.xml";
+static const char *FACE_MODEL_PROTOTXT = "/app/models/face_detector.prototxt";
+static const char *FACE_MODEL_WEIGHTS  = "/app/models/face_detector.caffemodel";
 
 //  Global state
 static std::atomic<bool>  g_running{true};
 static std::atomic<bool>  g_windowVisible{true};
 static std::atomic<int>   g_effectMode{6};
 static std::atomic<float> g_blurStrength{0.5f};
+static std::atomic<float> g_zoomFactor{1.0f};
+static std::atomic<float> g_panX{0.0f};  // -1.0 (left)  .. 1.0 (right)
+static std::atomic<float> g_panY{0.0f};  // -1.0 (up)    .. 1.0 (down)
+static std::atomic<bool>  g_autoReframe{false};
+static std::atomic<int>   g_reframeModel{1};  // 0=Haar cascade, 1=DNN SSD
+static std::atomic<float> g_reframeMinZoom{1.15f};   // 1.0 .. 2.0
+static std::atomic<float> g_reframeSmoothing{0.8f};  // 0.5 (fast) .. 0.95 (smooth)
+static std::atomic<bool>  g_virtualLight{false};
+static std::atomic<float> g_virtualLightIntensity{0.5f};  // 0.0 .. 1.0
 static std::atomic<int>   g_cameraWidth{1280};
 static std::atomic<int>   g_cameraHeight{720};
 static std::atomic<int>   g_cameraFps{30};
@@ -78,6 +94,294 @@ static void writePidFile() {
         fclose(f);
     }
 }
+
+//  Digital zoom: crop a region and scale it back up to the full frame size,
+//  applied to the raw camera frame *before* any effect runs, so green
+//  screen/blur/etc. all operate on the zoomed-in, recentered view of the
+//  person. panX/panY (-1..1) shift the crop window within the room left by
+//  zooming, so the framing can be recentered instead of always cropping
+//  symmetrically from the middle.
+static void applyZoom(cv::Mat &frame, float zoom, float panX, float panY) {
+    if (zoom <= 1.0f || frame.empty()) return;
+    int cropW = std::max(1, (int)std::round(frame.cols / zoom));
+    int cropH = std::max(1, (int)std::round(frame.rows / zoom));
+    int maxShiftX = (frame.cols - cropW) / 2;
+    int maxShiftY = (frame.rows - cropH) / 2;
+    int x = maxShiftX + (int)std::round(panX * maxShiftX);
+    int y = maxShiftY + (int)std::round(panY * maxShiftY);
+    x = std::clamp(x, 0, frame.cols - cropW);
+    y = std::clamp(y, 0, frame.rows - cropH);
+    cv::Mat cropped = frame(cv::Rect(x, y, cropW, cropH));
+    cv::Mat zoomed;
+    cv::resize(cropped, zoomed, frame.size(), 0, 0, cv::INTER_LINEAR);
+    frame = zoomed;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Auto Reframe: detects the user's face and drives the same zoom/pan used
+// by the manual controls to keep the face centered and a comfortable size,
+// smoothed over time so the framing doesn't jitter frame to frame.
+//
+// Two selectable detector backends, both CPU-only with no NVIDIA SDK
+// dependency:
+//   - Haar cascade: lighter, but noticeably misses non-frontal head angles.
+//   - DNN SSD (res10_300x300): heavier, far more reliable across angle and
+//     partial occlusion (glasses, headphones).
+// ══════════════════════════════════════════════════════════════════════════
+enum class ReframeModel { Haar = 0, Dnn = 1 };
+
+// Shared by AutoReframer and VirtualLight: runs the res10_300x300 SSD face
+// detector and returns the highest-confidence face box, if any clears the
+// threshold.
+static bool detectFaceDnn(cv::dnn::Net &net, const cv::Mat &frame, cv::Rect2f &outFace,
+                           float confidenceThreshold = 0.5f) {
+    cv::Mat blob = cv::dnn::blobFromImage(frame, 1.0, cv::Size(300, 300),
+        cv::Scalar(104.0, 177.0, 123.0), false, false);
+    net.setInput(blob);
+    cv::Mat detections = net.forward();
+    cv::Mat results(detections.size[2], detections.size[3], CV_32F, detections.ptr<float>());
+
+    float bestConfidence = confidenceThreshold;
+    bool found = false;
+    for (int i = 0; i < results.rows; i++) {
+        float confidence = results.at<float>(i, 2);
+        if (confidence <= bestConfidence) continue;
+        float x1 = results.at<float>(i, 3) * frame.cols;
+        float y1 = results.at<float>(i, 4) * frame.rows;
+        float x2 = results.at<float>(i, 5) * frame.cols;
+        float y2 = results.at<float>(i, 6) * frame.rows;
+        bestConfidence = confidence;
+        outFace = cv::Rect2f(x1, y1, x2 - x1, y2 - y1);
+        found = true;
+    }
+    return found;
+}
+
+class AutoReframer {
+public:
+    bool initHaar(const std::string &cascadePath) {
+        haarLoaded_ = cascade_.load(cascadePath);
+        if (!haarLoaded_) std::cerr << "AutoReframe: failed to load cascade: " << cascadePath << std::endl;
+        return haarLoaded_;
+    }
+
+    bool initDnn(const std::string &prototxtPath, const std::string &weightsPath) {
+        try {
+            net_ = cv::dnn::readNetFromCaffe(prototxtPath, weightsPath);
+        } catch (const cv::Exception &e) {
+            std::cerr << "AutoReframe: failed to load DNN face detector: " << e.what() << std::endl;
+            return false;
+        }
+        dnnLoaded_ = !net_.empty();
+        return dnnLoaded_;
+    }
+
+    void setModel(ReframeModel m) { model_ = m; }
+    void setMinZoom(float z) { minZoom_ = z; }
+    void setSmoothing(float s) { smoothing_ = s; }
+
+    // Computes a smoothed (zoom, panX, panY) that keeps the detected face
+    // centered. Returns false if no face has ever been locked onto yet, in
+    // which case the caller should fall back to the manual zoom/pan values.
+    bool update(const cv::Mat &frame, float &outZoom, float &outPanX, float &outPanY) {
+        if (frame.empty()) return false;
+
+        // Detection is the expensive part; re-running it every single frame
+        // is wasted work; wasted work compounds badly once another feature
+        // (Virtual Light) also runs its own detector each frame. The
+        // existing smoothing already holds the last known position between
+        // detections, so skipping most frames is visually seamless.
+        cv::Rect2f bestFace;
+        bool found = false;
+        if (++frameCounter_ % kDetectEveryN == 0) {
+            found = (model_ == ReframeModel::Dnn && dnnLoaded_) ? detectDnn(frame, bestFace)
+                  : (model_ == ReframeModel::Haar && haarLoaded_) ? detectHaar(frame, bestFace)
+                  : false;
+        }
+
+        if (found) {
+            float faceCenterX = bestFace.x + bestFace.width / 2.0f;
+            float faceCenterY = bestFace.y + bestFace.height / 2.0f;
+            float faceH = bestFace.height;
+
+            // A floor above 1.0x guarantees some crop margin even when the face
+            // already fills the frame (e.g. sitting close to a laptop webcam) —
+            // without it, zoom clamps to 1.0x and panning has no room to work,
+            // so the feature would do nothing for anyone already well-framed.
+            float targetZoom = std::clamp(std::max(minZoom_,
+                (kTargetFaceHeightFrac * frame.rows) / std::max(faceH, 1.0f)), 1.0f, 2.0f);
+            float cropW = frame.cols / targetZoom;
+            float cropH = frame.rows / targetZoom;
+            float maxShiftX = (frame.cols - cropW) / 2.0f;
+            float maxShiftY = (frame.rows - cropH) / 2.0f;
+            float targetPanX = maxShiftX > 0.5f
+                ? std::clamp((faceCenterX - cropW / 2.0f - maxShiftX) / maxShiftX, -1.0f, 1.0f) : 0.0f;
+            float targetPanY = maxShiftY > 0.5f
+                ? std::clamp((faceCenterY - cropH / 2.0f - maxShiftY) / maxShiftY, -1.0f, 1.0f) : 0.0f;
+
+            hasLock_ = true;
+            smoothZoom_ = smoothZoom_ * smoothing_ + targetZoom * (1.0f - smoothing_);
+            smoothPanX_ = smoothPanX_ * smoothing_ + targetPanX * (1.0f - smoothing_);
+            smoothPanY_ = smoothPanY_ * smoothing_ + targetPanY * (1.0f - smoothing_);
+        }
+        // If no face this frame, hold the last smoothed framing instead of
+        // snapping back to 1x — avoids jarring jumps on brief detection misses.
+        if (!hasLock_) return false;
+        outZoom = smoothZoom_;
+        outPanX = smoothPanX_;
+        outPanY = smoothPanY_;
+        return true;
+    }
+
+private:
+    bool detectDnn(const cv::Mat &frame, cv::Rect2f &outFace) {
+        return detectFaceDnn(net_, frame, outFace, kConfidenceThreshold);
+    }
+
+    bool detectHaar(const cv::Mat &frame, cv::Rect2f &outFace) {
+        cv::Mat gray;
+        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+        cv::equalizeHist(gray, gray);
+        std::vector<cv::Rect> faces;
+        cascade_.detectMultiScale(gray, faces, 1.1, 3, 0, cv::Size(60, 60));
+        if (faces.empty()) return false;
+        outFace = *std::max_element(faces.begin(), faces.end(),
+            [](const cv::Rect &a, const cv::Rect &b) { return a.area() < b.area(); });
+        return true;
+    }
+
+    static constexpr float kTargetFaceHeightFrac = 0.35f; // keep face ~35% of frame height
+    static constexpr float kConfidenceThreshold = 0.5f;
+
+    cv::CascadeClassifier cascade_;
+    cv::dnn::Net net_;
+    bool haarLoaded_ = false, dnnLoaded_ = false;
+    ReframeModel model_ = ReframeModel::Dnn;
+    float minZoom_ = 1.15f;   // floor so pan always has crop margin; user-configurable
+    float smoothing_ = 0.8f;  // higher = smoother/slower to react; user-configurable
+    bool hasLock_ = false;
+    float smoothZoom_ = 1.0f, smoothPanX_ = 0.0f, smoothPanY_ = 0.0f;
+    int frameCounter_ = 0;
+    static constexpr int kDetectEveryN = 2; // run the detector every other frame
+};
+
+static AutoReframer g_reframer;
+
+// ══════════════════════════════════════════════════════════════════════════
+// Virtual Light: approximates NVIDIA Broadcast's "Virtual Key Light" (an AI
+// relighting model that doesn't run on this GPU — same TensorRT/certified-
+// chip wall as Eye Contact and native Auto Reframe). Instead of a real
+// relighting model, this brightens a soft, face-anchored region — like an
+// actual light aimed at the user — using the same DNN face detector as
+// Auto Reframe, independent of whether Auto Reframe is enabled.
+// ══════════════════════════════════════════════════════════════════════════
+class VirtualLight {
+public:
+    bool init(const std::string &prototxtPath, const std::string &weightsPath) {
+        try {
+            net_ = cv::dnn::readNetFromCaffe(prototxtPath, weightsPath);
+        } catch (const cv::Exception &e) {
+            std::cerr << "VirtualLight: failed to load face detector: " << e.what() << std::endl;
+            return false;
+        }
+        loaded_ = !net_.empty();
+        return loaded_;
+    }
+
+    // personMatte, when non-null and non-empty, is the background-removal
+    // segmentation mask (0..255) for this exact frame — the light is ANDed
+    // against it so it can never bleed onto a replaced/blurred background,
+    // only the actual person. Call this after compositing (on the frame the
+    // viewer will actually see), not on the raw pre-effect frame: the alpha
+    // mask makes the result identical to relighting the person alone, while
+    // guaranteeing zero leakage into whatever background ends up behind them.
+    void apply(cv::Mat &frame, float intensity, const cv::Mat *personMatte = nullptr) {
+        if (!loaded_ || frame.empty() || intensity <= 0.0f) return;
+
+        // Same reasoning as AutoReframer: skip most frames' detection and
+        // hold the last known face position — keeps this affordable even
+        // when Auto Reframe's own detector is also running every frame.
+        cv::Rect2f face;
+        if (++frameCounter_ % kDetectEveryN == 0 && detectFaceDnn(net_, frame, face)) {
+            if (!hasLock_) {
+                lastFace_ = face;
+            } else {
+                float a = 1.0f - kSmoothing;
+                lastFace_.x += (face.x - lastFace_.x) * a;
+                lastFace_.y += (face.y - lastFace_.y) * a;
+                lastFace_.width += (face.width - lastFace_.width) * a;
+                lastFace_.height += (face.height - lastFace_.height) * a;
+            }
+            hasLock_ = true;
+        }
+        if (!hasLock_) return;
+
+        // Soft ellipse over face + upper body, like a key light aimed at the
+        // user — feathered heavily so there's no visible edge.
+        cv::Point center((int)(lastFace_.x + lastFace_.width / 2.0f),
+                          (int)(lastFace_.y + lastFace_.height * 0.65f));
+        cv::Size axes((int)(lastFace_.width * 1.4f), (int)(lastFace_.height * 2.0f));
+        if (axes.width <= 0 || axes.height <= 0) return;
+
+        cv::Mat mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+        cv::ellipse(mask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
+        // GaussianBlur's cost scales with kernel size; using the raw ellipse
+        // axes as the kernel (unbounded — hundreds of px for a large/zoomed
+        // face) made this take ~3 SECONDS per frame instead of a few ms,
+        // which is what actually looked like a freeze. A capped kernel still
+        // gives a soft, wide feather without the runaway cost.
+        int blurSize = std::min(81, std::max(axes.width, axes.height) | 1);
+        cv::GaussianBlur(mask, mask, cv::Size(blurSize, blurSize), 0);
+
+        if (personMatte != nullptr && !personMatte->empty() && personMatte->size() == frame.size()) {
+            cv::bitwise_and(mask, *personMatte, mask);
+        }
+
+        // Adaptive shadow lift: measure current face brightness under the
+        // mask and scale it toward a comfortable target, so already
+        // well-lit faces aren't washed out — only actual shadow gets opened
+        // up, the way a real fill light would behave.
+        cv::Mat gray;
+        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+        double faceLum = cv::mean(gray, mask)[0];
+        float ratio = (faceLum > 1.0)
+            ? std::clamp((float)(kTargetLuminance / faceLum), 1.0f, kMaxRatio) : 1.0f;
+        float adjRatio = 1.0f + (ratio - 1.0f) * intensity;
+
+        cv::Mat maskF;
+        mask.convertTo(maskF, CV_32F, 1.0 / 255.0);
+        cv::Mat mask3f;
+        cv::cvtColor(maskF, mask3f, cv::COLOR_GRAY2BGR);
+
+        // Scale (not just add) brightness so the lift is proportional to how
+        // dark the face actually is, with a slight warm tint like a real light.
+        cv::Mat lit;
+        frame.convertTo(lit, CV_32FC3, adjRatio, 4.0);
+        std::vector<cv::Mat> ch;
+        cv::split(lit, ch);
+        ch[2] += 6.0f; // BGR: warm the red channel a bit
+        cv::merge(ch, lit);
+
+        cv::Mat frameF, outF;
+        frame.convertTo(frameF, CV_32FC3);
+        outF = lit.mul(mask3f) + frameF.mul(cv::Scalar(1, 1, 1) - mask3f);
+        outF.convertTo(frame, CV_8UC3);
+    }
+
+private:
+    static constexpr float kSmoothing = 0.8f;
+    static constexpr double kTargetLuminance = 170.0; // comfortable brightness to lift shadows toward
+    static constexpr float kMaxRatio = 1.5f;           // cap so it never blows out highlights
+
+    cv::dnn::Net net_;
+    bool loaded_ = false;
+    bool hasLock_ = false;
+    cv::Rect2f lastFace_;
+    int frameCounter_ = 0;
+    static constexpr int kDetectEveryN = 2; // run the detector every other frame
+};
+
+static VirtualLight g_virtualLightFx;
 
 // ══════════════════════════════════════════════════════════════════════════
 // Virtual Camera
@@ -284,7 +588,11 @@ public:
         return true;
     }
 
-    cv::Mat process(const cv::Mat &frame, int mode) {
+    // outMatte, when provided, receives the person/background segmentation
+    // mask (0..255) computed for this frame — empty if mode doesn't run
+    // segmentation (MODE_NONE) or on early failure, meaning "no restriction".
+    cv::Mat process(const cv::Mat &frame, int mode, cv::Mat *outMatte = nullptr) {
+        if (outMatte) *outMatte = cv::Mat();
         if (!inited_ || mode == MODE_NONE) return frame.clone();
         if (frame.cols != bufWidth_ || frame.rows != bufHeight_) return frame.clone();
 
@@ -303,6 +611,7 @@ public:
 
         if (NvVFX_Run(eff_, 0) != NVCV_SUCCESS) return frame.clone();
         NvCVImage_Transfer(&dstGPU_, &matteW, 1.0f, stream_, NULL);
+        if (outMatte) *outMatte = matte;
 
         switch (mode) {
         case MODE_MATTE:
@@ -466,6 +775,32 @@ static void commandListener() {
                     g_effectMode = std::stoi(cmd.substr(5));
                 } else if (cmd.rfind("BLUR:", 0) == 0) {
                     g_blurStrength = std::stof(cmd.substr(5));
+                } else if (cmd.rfind("ZOOM:", 0) == 0) {
+                    float z = std::stof(cmd.substr(5));
+                    if (z >= 1.0f && z <= 2.0f) g_zoomFactor = z;
+                } else if (cmd.rfind("PANX:", 0) == 0) {
+                    float p = std::stof(cmd.substr(5));
+                    if (p >= -1.0f && p <= 1.0f) g_panX = p;
+                } else if (cmd.rfind("PANY:", 0) == 0) {
+                    float p = std::stof(cmd.substr(5));
+                    if (p >= -1.0f && p <= 1.0f) g_panY = p;
+                } else if (cmd.rfind("AUTOREFRAME:", 0) == 0) {
+                    g_autoReframe = (cmd.substr(12) == "1");
+                } else if (cmd.rfind("AUTOREFRAME_MODEL:", 0) == 0) {
+                    std::string m = cmd.substr(18);
+                    if (m == "haar") g_reframeModel = 0;
+                    else if (m == "dnn") g_reframeModel = 1;
+                } else if (cmd.rfind("AUTOREFRAME_ZOOM:", 0) == 0) {
+                    float v = std::stof(cmd.substr(17));
+                    if (v >= 1.0f && v <= 2.0f) g_reframeMinZoom = v;
+                } else if (cmd.rfind("AUTOREFRAME_SPEED:", 0) == 0) {
+                    float v = std::stof(cmd.substr(19));
+                    if (v >= 0.5f && v <= 0.95f) g_reframeSmoothing = v;
+                } else if (cmd.rfind("VIRTUALLIGHT_INTENSITY:", 0) == 0) {
+                    float v = std::stof(cmd.substr(23));
+                    if (v >= 0.0f && v <= 1.0f) g_virtualLightIntensity = v;
+                } else if (cmd.rfind("VIRTUALLIGHT:", 0) == 0) {
+                    g_virtualLight = (cmd.substr(13) == "1");
                 } else if (cmd.rfind("BG:", 0) == 0) {
                     std::lock_guard<std::mutex> lock(g_bgMutex);
                     g_bgFile = cmd.substr(3);
@@ -536,6 +871,14 @@ int main(int argc, char **argv) {
     setenv("OPENCV_VIDEOIO_PRIORITY_V4L2",     "990", 0);
     setenv("OPENCV_VIDEOIO_PRIORITY_GSTREAMER", "0",   0);
 
+    // Auto Reframe and Virtual Light each hold their own cv::dnn::Net; by
+    // default OpenCV's DNN backend fans a single forward() call out across
+    // every logical core. With two nets potentially running per frame, that
+    // caused severe thread oversubscription (~1000% CPU, near-frozen video)
+    // instead of the expected roughly-additive cost. Capping it keeps both
+    // detectors affordable together.
+    cv::setNumThreads(4);
+
     std::string modelDir = "/usr/local/VideoFX/lib/models";
     int aiMode = 0;
     for (int i = 1; i < argc; i++) {
@@ -552,6 +895,15 @@ int main(int argc, char **argv) {
     std::cout << "AI mode:   " << (aiMode == 0 ? "Quality" : "Performance") << std::endl;
 
     writePidFile();
+
+    bool haarOk = g_reframer.initHaar(FACE_CASCADE_PATH);
+    bool dnnOk = g_reframer.initDnn(FACE_MODEL_PROTOTXT, FACE_MODEL_WEIGHTS);
+    if (!haarOk && !dnnOk) {
+        std::cerr << "AutoReframe: no face detector available, feature will be a no-op" << std::endl;
+    }
+    if (!g_virtualLightFx.init(FACE_MODEL_PROTOTXT, FACE_MODEL_WEIGHTS)) {
+        std::cerr << "VirtualLight: face detector unavailable, feature will be a no-op" << std::endl;
+    }
 
     std::thread cmdThread(commandListener);
 
@@ -685,9 +1037,42 @@ int main(int argc, char **argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
+        float zoom = g_zoomFactor.load();
+        float panX = g_panX.load();
+        float panY = g_panY.load();
+        if (g_autoReframe.load()) {
+            try {
+                g_reframer.setModel(static_cast<ReframeModel>(g_reframeModel.load()));
+                g_reframer.setMinZoom(g_reframeMinZoom.load());
+                g_reframer.setSmoothing(g_reframeSmoothing.load());
+                float autoZoom, autoPanX, autoPanY;
+                if (g_reframer.update(frame, autoZoom, autoPanX, autoPanY)) {
+                    zoom = autoZoom;
+                    panX = autoPanX;
+                    panY = autoPanY;
+                }
+            } catch (const std::exception &e) {
+                std::cerr << "AutoReframe error, skipping this frame: " << e.what() << std::endl;
+            }
+        }
+        applyZoom(frame, zoom, panX, panY);
 
         int mode = g_effectMode.load();
-        cv::Mat result = vfx.process(frame, mode);
+        cv::Mat matte;
+        cv::Mat result;
+        try {
+            result = vfx.process(frame, mode, &matte);
+
+            // Applied after compositing, gated by the segmentation matte, so
+            // the light only ever touches the actual person — never the
+            // background that just got replaced/blurred behind them.
+            if (g_virtualLight.load()) {
+                g_virtualLightFx.apply(result, g_virtualLightIntensity.load(), &matte);
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Frame processing error, using unprocessed frame: " << e.what() << std::endl;
+            result = frame.clone();
+        }
 
         vcam.writeFrame(result);
 

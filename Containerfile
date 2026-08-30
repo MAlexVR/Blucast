@@ -1,3 +1,11 @@
+# Runtime libraries + AI models (Maxine VideoFX v0.7.2.0) come from the
+# already-published image instead of a manual SDK download: the API headers
+# are vendored (MIT-licensed) in app/third_party/, and the compiled .so's are
+# proprietary NVIDIA binaries we don't have the right to redistribute as a
+# separate downloadable package, but reusing them from an image already
+# published under the project's own license is fine.
+FROM ghcr.io/andrei9383/blucast:latest AS runtime-libs
+
 FROM docker.io/nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -6,19 +14,13 @@ RUN apt-get update && apt-get install -y \
     cmake build-essential libopencv-dev libv4l-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY sdk/TensorRT-8.5.1.7 /usr/local/TensorRT-8.5.1.7
-COPY sdk/VideoFX          /usr/local/VideoFX
-COPY sdk/cudnn             /usr/local/cuda/
-
-ENV LD_LIBRARY_PATH=/usr/local/TensorRT-8.5.1.7/lib:/usr/local/VideoFX/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+COPY --from=runtime-libs /usr/local/lib/blucast /usr/local/lib/blucast
 
 WORKDIR /build
 COPY app/ /app/
 
 RUN mkdir -p /build/blucast && cd /build/blucast && \
-    cmake /app \
-    -DCMAKE_CXX_FLAGS='-I/usr/local/VideoFX/include -I/usr/local/VideoFX/share/samples/utils' \
-    -DCMAKE_EXE_LINKER_FLAGS='-L/usr/local/VideoFX/lib -Wl,-rpath,/usr/local/VideoFX/lib:/usr/local/TensorRT-8.5.1.7/lib' && \
+    cmake /app && \
     make -j$(nproc)
 
 RUN gcc -shared -fPIC -o /build/libcc_spoof.so /app/cc_spoof.c -ldl
@@ -33,6 +35,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     libopencv-videoio4.2 libopencv-imgproc4.2 libopencv-highgui4.2 \
+    libopencv-objdetect4.2 libopencv-dnn4.2 opencv-data \
     python3 python3-pip v4l-utils \
     libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-keysyms1 \
     libxcb-shape0 libegl1 libgl1-mesa-glx libxkbcommon0 libxkbcommon-x11-0 \
@@ -44,21 +47,14 @@ RUN pip3 install --no-cache-dir PySide6 numpy
 
 COPY --from=builder /build/blucast/blucast_server /app/blucast_server
 COPY --from=builder /build/libcc_spoof.so /usr/local/lib/blucast/libcc_spoof.so
-
-COPY --from=builder /usr/local/TensorRT-8.5.1.7/lib/libnvinfer.so.8*        /usr/local/lib/blucast/
-COPY --from=builder /usr/local/TensorRT-8.5.1.7/lib/libnvinfer_plugin.so.8* /usr/local/lib/blucast/
-COPY --from=builder /usr/local/TensorRT-8.5.1.7/lib/libnvparsers.so.8*      /usr/local/lib/blucast/
-COPY --from=builder /usr/local/TensorRT-8.5.1.7/lib/libnvonnxparser.so.8*   /usr/local/lib/blucast/
-COPY --from=builder /usr/local/VideoFX/lib/libVideoFX.so*     /usr/local/lib/blucast/
-COPY --from=builder /usr/local/VideoFX/lib/libNVCVImage.so*   /usr/local/lib/blucast/
-COPY --from=builder /usr/local/VideoFX/lib/libNVTRTLogger.so* /usr/local/lib/blucast/
-
-COPY --from=builder /usr/local/VideoFX/lib/models /usr/local/VideoFX/lib/models
+COPY --from=runtime-libs /usr/local/lib/blucast /usr/local/lib/blucast
+COPY --from=runtime-libs /usr/local/VideoFX/lib/models /usr/local/VideoFX/lib/models
 
 RUN ln -sf /usr/local/lib/blucast/libVideoFX.so /usr/local/lib/blucast/libNVVideoEffects.so
 
-COPY app/control_panel.py /app/
-COPY assets/              /app/assets/
+COPY app/control_panel.py     /app/
+COPY app/models/              /app/models/
+COPY assets/                  /app/assets/
 
 ENV LD_LIBRARY_PATH=/usr/local/lib/blucast:$LD_LIBRARY_PATH
 WORKDIR /app

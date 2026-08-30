@@ -2,7 +2,11 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please report it by emailing the project maintainer (Andrei9383) directly rather than opening a public issue.
+If you discover a security vulnerability in this fork, please report it
+privately via [GitHub Security Advisories](https://github.com/MAlexVR/Blucast/security/advisories/new)
+rather than opening a public issue. If the vulnerability also affects
+upstream [Andrei9383/Blucast](https://github.com/Andrei9383/Blucast) (i.e.
+it's not specific to a change made in this fork), please report it there too.
 
 When reporting:
 1. Describe the vulnerability in detail

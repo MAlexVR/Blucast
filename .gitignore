@@ -6,6 +6,8 @@ scripts/release-tag.sh
 
 # SDK
 sdk/
+SDK/
+API_KEY
 
 # Build outputs
 app/build/
