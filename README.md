@@ -275,6 +275,25 @@ install method uses), the desktop entry and icon, and the v4l2loopback
 module config under `/usr/lib/{modules-load.d,modprobe.d,udev/rules.d}/` so
 the virtual camera is ready on next boot with no manual `modprobe` needed.
 
+**Installing it today (Fedora, before COPR is set up):**
+
+```bash
+sudo dnf install rpm-build rpmdevtools
+rpmdev-setuptree
+git clone https://github.com/MAlexVR/Blucast.git
+cd Blucast
+spectool -g --sourcedir packaging/blucast.spec   # downloads the release tarball
+rpmbuild -bb packaging/blucast.spec
+sudo dnf install ~/rpmbuild/RPMS/noarch/blucast-*.rpm
+```
+
+**Once a COPR repo exists (see below), installing becomes just:**
+
+```bash
+sudo dnf copr enable malexvr/blucast
+sudo dnf install blucast
+```
+
 Publishing it on COPR needs a personal Fedora account (COPR builds are tied
 to your own [FAS](https://accounts.fedoraproject.org/) identity, so this is
 a step only a maintainer with such an account can do — not something that
